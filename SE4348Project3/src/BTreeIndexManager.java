@@ -33,38 +33,40 @@ public class BTreeIndexManager {
     private String currentFileName = null;
 
     public static void main(String[] args) {
+
         new BTreeIndexManager().start();
     }
 
     public void start() {
         Scanner scanner = new Scanner(System.in);
         while (true) {
-            printMenu();
+            printMenu(); // print menu
             System.out.print("Enter command: ");
-            String command = scanner.nextLine().trim().toLowerCase();
+            String command = scanner.nextLine().trim().toLowerCase(); // trim removes whitespace from front and back
+            // and converts to lowercase
 
             try {
                 switch (command) {
                     case "create":
-                        createFile(scanner);
+                        createFile(scanner); // works
                         break;
                     case "open":
-                        openFile(scanner);
+                        openFile(scanner);//works
                         break;
                     case "insert":
-                        insert(scanner);
+                        insert(scanner);// works
                         break;
                     case "search":
-                        search(scanner);
+                        search(scanner);//works
                         break;
                     case "load":
-                        load(scanner);
+                        load(scanner);//works for other files(test2, output) except for test which was created here
                         break;
                     case "print":
-                        printIndex();
+                        printIndex();//works
                         break;
                     case "extract":
-                        extract(scanner);
+                        extract(scanner);// i think works
                         break;
                     case "quit":
                         quit();
@@ -131,6 +133,8 @@ public class BTreeIndexManager {
             byte[] magic = new byte[8];
             raf.read(magic);
             if (!new String(magic).equals(MAGIC_NUMBER)) {
+                //The error "Invalid magic number in file" occurs when the open command validates the file by
+            //checking the first 8 bytes (magic number) and finds that it does not match the expected value (4337PRJ3)
                 System.out.println("Error: Invalid magic number in file.");
                 return;
             }
@@ -152,9 +156,101 @@ public class BTreeIndexManager {
         System.out.print("Enter value: ");
         long value = Long.parseUnsignedLong(scanner.nextLine().trim());
 
-        // Simplified insert logic for demonstration
-        System.out.println("Inserted key: " + key + ", value: " + value);
+        // Read the root block ID from the header
+        currentFile.seek(8); // Offset to root node block ID in the header
+        long rootBlockId = currentFile.readLong();
+
+        if (rootBlockId == 0) {
+            // If the tree is empty, create the root node
+            rootBlockId = createNode(0); // Root node has no parent
+            currentFile.seek(8); // Update the root node ID in the header
+            currentFile.writeLong(rootBlockId);
+        }
+
+        // Insert the key-value pair into the tree
+        boolean success = insertIntoNode(rootBlockId, key, value);
+        if (success) {
+            System.out.println("Inserted key: " + key + ", value: " + value);
+        } else {
+            System.out.println("Error: Key " + key + " already exists in the index.");
+        }
     }
+
+    private long createNode(long parentBlockId) throws IOException {
+        currentFile.seek(16); // Offset to the next block ID in the header
+        long nextBlockId = currentFile.readLong();
+
+        // Create a new node
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_SIZE);
+        buffer.putLong(nextBlockId); // Block ID
+        buffer.putLong(parentBlockId); // Parent block ID
+        buffer.putLong(0); // Number of key-value pairs (initially 0)
+        for (int i = 0; i < 19; i++) buffer.putLong(0); // Empty keys
+        for (int i = 0; i < 19; i++) buffer.putLong(0); // Empty values
+        for (int i = 0; i < 20; i++) buffer.putLong(0); // Empty child pointers
+
+        currentFile.seek(nextBlockId * BLOCK_SIZE);
+        currentFile.write(buffer.array());
+
+        // Update the next block ID in the header
+        currentFile.seek(16);
+        currentFile.writeLong(nextBlockId + 1);
+
+        return nextBlockId;
+    }
+
+    private boolean insertIntoNode(long blockId, long key, long value) throws IOException {
+        currentFile.seek(blockId * BLOCK_SIZE);
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_SIZE);
+        currentFile.read(buffer.array());
+
+        long nodeBlockId = buffer.getLong(); // Block ID of this node
+        buffer.getLong(); // Parent block ID
+        int numPairs = (int) buffer.getLong(); // Number of key-value pairs
+
+        long[] keys = new long[19];
+        long[] values = new long[19];
+        long[] childPointers = new long[20];
+
+        // Read keys, values, and child pointers
+        for (int i = 0; i < 19; i++) keys[i] = buffer.getLong();
+        for (int i = 0; i < 19; i++) values[i] = buffer.getLong();
+        for (int i = 0; i < 20; i++) childPointers[i] = buffer.getLong();
+
+        // Find the position to insert
+        int pos = 0;
+        while (pos < numPairs && keys[pos] < key) pos++;
+
+        if (pos < numPairs && keys[pos] == key) {
+            // Key already exists
+            return false;
+        }
+
+        if (childPointers[pos] == 0) {
+            // Leaf node: insert key-value pair here
+            for (int i = numPairs; i > pos; i--) {
+                keys[i] = keys[i - 1];
+                values[i] = values[i - 1];
+            }
+            keys[pos] = key;
+            values[pos] = value;
+
+            numPairs++;
+            buffer.position(16); // Reset buffer to numPairs position
+            buffer.putLong(numPairs);
+            for (int i = 0; i < 19; i++) buffer.putLong(keys[i]);
+            for (int i = 0; i < 19; i++) buffer.putLong(values[i]);
+            for (int i = 0; i < 20; i++) buffer.putLong(childPointers[i]);
+
+            currentFile.seek(blockId * BLOCK_SIZE);
+            currentFile.write(buffer.array());
+            return true;
+        } else {
+            // Recur to the appropriate child node
+            return insertIntoNode(childPointers[pos], key, value);
+        }
+    }
+
 
     private void search(Scanner scanner) throws IOException {
         if (currentFile == null) {
@@ -162,11 +258,59 @@ public class BTreeIndexManager {
             return;
         }
 
-        System.out.print("Enter key: ");
+        System.out.print("Enter key to search: ");
         long key = Long.parseUnsignedLong(scanner.nextLine().trim());
 
-        // Simplified search logic for demonstration
-        System.out.println("Key " + key + " not found.");
+        // Read the root block ID from the header
+        currentFile.seek(8); // Offset to root node block ID in the header
+        long rootBlockId = currentFile.readLong();
+
+        if (rootBlockId == 0) {
+            System.out.println("The index is empty.");
+            return;
+        }
+
+        // Perform the search starting from the root node
+        long value = searchInNode(rootBlockId, key);
+        if (value == -1) {
+            System.out.println("Key " + key + " not found.");
+        } else {
+            System.out.println("Found key: " + key + ", value: " + value);
+        }
+    }
+
+    private long searchInNode(long blockId, long key) throws IOException {
+        if (blockId == 0) return -1; // No node to search
+
+        currentFile.seek(blockId * BLOCK_SIZE);
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_SIZE);
+        currentFile.read(buffer.array());
+
+        buffer.getLong(); // Block ID of this node
+        buffer.getLong(); // Parent block ID
+        int numPairs = (int) buffer.getLong(); // Number of key-value pairs
+
+        long[] keys = new long[19];
+        long[] values = new long[19];
+        long[] childPointers = new long[20];
+
+        // Read keys, values, and child pointers
+        for (int i = 0; i < 19; i++) keys[i] = buffer.getLong();
+        for (int i = 0; i < 19; i++) values[i] = buffer.getLong();
+        for (int i = 0; i < 20; i++) childPointers[i] = buffer.getLong();
+
+        // Perform binary search or linear search to find the key
+        for (int i = 0; i < numPairs; i++) {
+            if (keys[i] == key) {
+                return values[i]; // Key found
+            } else if (key < keys[i]) {
+                // Traverse left child pointer
+                return searchInNode(childPointers[i], key);
+            }
+        }
+
+        // Traverse rightmost child pointer if key is greater than all keys in this node
+        return searchInNode(childPointers[numPairs], key);
     }
 
     private void load(Scanner scanner) throws IOException {
@@ -188,12 +332,23 @@ public class BTreeIndexManager {
             String line;
             while ((line = reader.readLine()) != null) {
                 String[] parts = line.split(",");
-                long key = Long.parseUnsignedLong(parts[0].trim());
-                long value = Long.parseUnsignedLong(parts[1].trim());
-                System.out.println("Loaded key: " + key + ", value: " + value);
+                if (parts.length != 2) {
+                    System.out.println("Skipping invalid line: " + line);
+                    continue;
+                }
+
+                try {
+                    long key = Long.parseUnsignedLong(parts[0].trim());
+                    long value = Long.parseUnsignedLong(parts[1].trim());
+                    // Call the insert logic here
+                    System.out.println("Loaded key: " + key + ", value: " + value);
+                } catch (NumberFormatException e) {
+                    System.out.println("Skipping invalid line (not numbers): " + line);
+                }
             }
         }
     }
+
 
     private void printIndex() throws IOException {
         if (currentFile == null) {
@@ -201,8 +356,51 @@ public class BTreeIndexManager {
             return;
         }
 
-        System.out.println("Printing index...");
-        // Simplified print logic for demonstration
+        currentFile.seek(8); // Offset to the root node block ID in the header
+        long rootBlockId = currentFile.readLong();
+
+        if (rootBlockId == 0) {
+            System.out.println("The index is empty.");
+            return;
+        }
+
+        System.out.println("Index contents:");
+        printNode(rootBlockId);
+    }
+
+    private void printNode(long blockId) throws IOException {
+        if (blockId == 0) return; // No node to process
+
+        currentFile.seek(blockId * BLOCK_SIZE); // Seek to the start of the block
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_SIZE);
+        currentFile.read(buffer.array());
+
+        long nodeBlockId = buffer.getLong(); // Block ID of this node
+        buffer.getLong(); // Skip parent block ID
+        int numPairs = (int) buffer.getLong(); // Number of key-value pairs
+
+        long[] keys = new long[19];
+        long[] values = new long[19];
+        long[] childPointers = new long[20];
+
+        // Read keys, values, and child pointers
+        for (int i = 0; i < 19; i++) {
+            keys[i] = buffer.getLong();
+        }
+        for (int i = 0; i < 19; i++) {
+            values[i] = buffer.getLong();
+        }
+        for (int i = 0; i < 20; i++) {
+            childPointers[i] = buffer.getLong();
+        }
+
+        // Print child pointers before the keys
+        for (int i = 0; i <= numPairs; i++) {
+            printNode(childPointers[i]); // Recursively print the child
+            if (i < numPairs) {
+                System.out.println("Key: " + keys[i] + ", Value: " + values[i]);
+            }
+        }
     }
 
     private void extract(Scanner scanner) throws IOException {
@@ -219,17 +417,58 @@ public class BTreeIndexManager {
             System.out.print("File already exists. Overwrite? (yes/no): ");
             String response = scanner.nextLine().trim().toLowerCase();
             if (!response.equals("yes")) {
-                System.out.println("Operation aborted.");
+                System.out.println("Extraction aborted.");
                 return;
             }
         }
 
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
-            writer.write("Extracted data");
-        }
+            currentFile.seek(8); // Offset to the root block ID in the header
+            long rootBlockId = currentFile.readLong();
 
-        System.out.println("Data extracted to " + fileName);
+            if (rootBlockId == 0) {
+                System.out.println("The index is empty. No data to extract.");
+                return;
+            }
+
+            // Perform extraction starting from the root node
+            extractNode(rootBlockId, writer);
+            System.out.println("Index successfully extracted to " + fileName);
+        } catch (IOException e) {
+            System.out.println("Error during extraction: " + e.getMessage());
+        }
     }
+
+    private void extractNode(long blockId, BufferedWriter writer) throws IOException {
+        if (blockId == 0) return; // No node to process
+
+        currentFile.seek(blockId * BLOCK_SIZE);
+        ByteBuffer buffer = ByteBuffer.allocate(BLOCK_SIZE);
+        currentFile.read(buffer.array());
+
+        buffer.getLong(); // Block ID of this node
+        buffer.getLong(); // Parent block ID
+        int numPairs = (int) buffer.getLong(); // Number of key-value pairs
+
+        long[] keys = new long[19];
+        long[] values = new long[19];
+        long[] childPointers = new long[20];
+
+        // Read keys, values, and child pointers
+        for (int i = 0; i < 19; i++) keys[i] = buffer.getLong();
+        for (int i = 0; i < 19; i++) values[i] = buffer.getLong();
+        for (int i = 0; i < 20; i++) childPointers[i] = buffer.getLong();
+
+        // Process child pointers and write key-value pairs
+        for (int i = 0; i <= numPairs; i++) {
+            extractNode(childPointers[i], writer); // Recursively process children
+            if (i < numPairs) {
+                writer.write(keys[i] + "," + values[i]);
+                writer.newLine();
+            }
+        }
+    }
+
 
     private void quit() {
         if (currentFile != null) {
